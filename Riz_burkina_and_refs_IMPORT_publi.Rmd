@@ -1,0 +1,133 @@
+---
+###################################################################################################################################
+#
+# Copyright 2021 IRD
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <http://www.gnu.org/licenses/> or
+# write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+#
+# You should have received a copy of the CeCILL-C license with this program.
+# If not see <http://www.cecill.info/licences/Licence_CeCILL-C_V1-en.txt>
+#
+# Intellectual property belongs to IRD
+#
+# Written by Philippe Cubry, Charlotte Tollenaere
+#
+###################################################################################################################################
+title: "Riz_Burkina_and_refs"
+author: "Philippe Cubry"
+date: "15/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+We first downloaded the 3K genomes data from the SNP Seek database (https://snp-seek.irri.org/) in PLINK format and convert it to VCF using the command line
+plink --bfile --keep-allele-order --recode vcf --out 3Kgenomes and we filtered out the SNPs common with the 7kSNPs using bcftools.
+Then we import the data within R.
+## Importing datasets
+```{r}
+library(data.table)
+library(vcfR)
+data_snp <- fread("snp_dataset_publi.csv")
+```
+As the two datafiles does not have the same format, we'll have to deal with them.
+We will first make a bit of cleaning and keep only useful data.
+
+## Burkina dataset cleaning
+```{r}
+infos_snp <- t(data_snp[c(1:5),-c(1:15)]) ; colnames(infos_snp) <- infos_snp[1,]; infos_snp <- infos_snp[-1,] # We get the infos for the SNPs (Name, Ref and Alt allele, Chromosome, Position)
+```
+## Reference dataset import
+```{r}
+ref_vcf_snpseek <- read.vcfR("3Kgenomes_7KsnpsExtract.vcf")
+```
+## Extraction of the informations for both burkina and ref sets
+```{r}
+ref_infos <- cbind(paste0(ref_vcf_snpseek@fix[,"CHROM"],"_",ref_vcf_snpseek@fix[,"POS"]),ref_vcf_snpseek@fix[,"REF"],ref_vcf_snpseek@fix[,"ALT"])
+colnames(ref_infos) <- c("Name","Ref_ref","Alt_ref")
+
+burkina_infos <- cbind(paste0(infos_snp[,"chromosome"],"_",infos_snp[,"position"]),infos_snp[,"Ref_Allele"],infos_snp[,"Alt_Allele"],infos_snp[,"Name"])
+colnames(burkina_infos) <- c("Name","Ref_bur","Alt_bur","NameChip")
+```
+## Matching test between burkina and ref sets and some tests
+```{r}
+both <- merge(ref_infos,burkina_infos,all.x=FALSE,all.y=FALSE)
+both$test <- both$Ref_ref==both$Ref_bur & both$Alt_ref==both$Alt_bur # test if ref allele is the same btwn both datasets
+both$test_b <- both$Ref_ref==both$Alt_bur & both$Alt_ref==both$Ref_bur # test if there is an inversion in ref and alt allele from both datasets
+both$test_c <- both$test | both$test_b # TRUE if one of the previous test was TRUE
+both$test_d <- both$Ref_ref=="A" & both$Alt_ref=="T" | both$Ref_ref=="T" & both$Alt_ref=="A" | both$Ref_ref=="G" & both$Alt_ref=="C" | both$Ref_ref=="C" & both$Alt_ref=="G" # Test for positions that might exhibit problems when sequencing sense is not the same
+
+length(which(both$test))
+length(which(both$test_b))
+length(which(both$test_c))
+length(which(both$test_d))
+```
+Based on this analysis, all SNP positions seems to be correctly oriented in the dataset, thus we will go on with this dataset. However, we will also check and remove possible duplicates.
+```{r}
+which(duplicated(burkina_infos[,"Name"]))
+burkina_infos[which(duplicated(burkina_infos[,"Name"])),"Name"]
+which(burkina_infos[,"Name"]==burkina_infos[which(duplicated(burkina_infos[,"Name"])),"Name"])
+to_remove <- c(burkina_infos[which(burkina_infos[,"Name"]==burkina_infos[which(duplicated(burkina_infos[,"Name"])),"Name"]),"NameChip"],both[both$test_d,"NameChip"])
+```
+In order to match the two datasets, we will exclude the positions that might be problematic and use the Ref/Alt coding of the 3k as reference for data transformation of the chip.
+```{r}
+data_bk <- as.data.frame(t(data_snp),stringsAsFactors = FALSE)
+data_names <- as.vector(unlist(c(data_bk[16,1:6],data_bk[3,7:ncol(data_bk)])))
+data_bk <-data_bk[17:nrow(data_bk),]
+colnames(data_bk) <- data_names
+data_bk <-data_bk[!data_bk[,"Name"]%in%to_remove,-6] # Remove identified problematic positions
+data_bk$Chr_Pos <- paste0(data_bk$chromosome,"_",data_bk$position) # make common identifier
+data_bk <- merge(ref_infos,data_bk,by.x="Name",by.y="Chr_Pos") ; data_bk <- data_bk[-c(4:8)] # Merge definition of the Ref/Alt allele from the 3k data
+for(l in 1:nrow(data_bk)){ # Transforming the data
+  data_bk[l,][data_bk[l,]==paste0(data_bk[l,2],data_bk[l,2])] <- 0
+  data_bk[l,][data_bk[l,]==paste0(data_bk[l,2],data_bk[l,3])] <- 1
+  data_bk[l,][data_bk[l,]==paste0(data_bk[l,3],data_bk[l,2])] <- 1
+  data_bk[l,][data_bk[l,]==paste0(data_bk[l,3],data_bk[l,3])] <- 2
+  data_bk[l,][data_bk[l,]=="--"] <- NA
+}
+write.table(colnames(data_bk)[4:ncol(data_bk)],"bk_inds.csv")
+```
+
+We make the same transformation (in 0/1/2/NA values) for the 3k data.
+```{r}
+data_ref_snpseek <- as.data.frame(cbind(ref_vcf_snpseek@fix,ref_vcf_snpseek@gt),stringsAsFactors = FALSE)
+data_ref_snpseek[,10:ncol(data_ref_snpseek)][data_ref_snpseek[,10:ncol(data_ref_snpseek)] == "0/0"] <- 0
+data_ref_snpseek[,10:ncol(data_ref_snpseek)][data_ref_snpseek[,10:ncol(data_ref_snpseek)] == "0/1"] <- 1
+data_ref_snpseek[,10:ncol(data_ref_snpseek)][data_ref_snpseek[,10:ncol(data_ref_snpseek)] == "1/0"] <- 1
+data_ref_snpseek[,10:ncol(data_ref_snpseek)][data_ref_snpseek[,10:ncol(data_ref_snpseek)] == "1/1"] <- 2
+data_ref_snpseek$CHROM <- paste0(data_ref_snpseek$CHROM,"_",data_ref_snpseek$POS) ; colnames(data_ref_snpseek)[1] <- "Name"
+data_ref_snpseek <- data_ref_snpseek[,-c(2:10)]
+```
+
+We can now finally merge the two datasets for further analyses.
+```{r}
+merged_data <- merge(data_bk,data_ref_snpseek)
+row.names(merged_data) <- merged_data$Name
+merged_data$Name <- NULL ; merged_data$Ref_ref <- NULL ; merged_data$Alt_ref <- NULL
+```
+
+And we can export the data to a convenient format.
+
+```{r}
+library(LEA)
+tmp <- t(apply(merged_data,1,as.numeric))
+write.lfmm(tmp,"burkina_ref_snpseek.lfmm")
+inds <- colnames(merged_data) ; write.table(inds,"burkina_ref_snpseek.ind",row.names = F,col.names = F,quote = F)
+snps <- row.names(merged_data) ; write.table(snps,"burkina_refsnpseek.snp",row.names = F,col.names = F,quote = F)
+```
+

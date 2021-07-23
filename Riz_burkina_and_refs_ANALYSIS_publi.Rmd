@@ -1,0 +1,411 @@
+---
+###################################################################################################################################
+#
+# Copyright 2021 IRD
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, see <http://www.gnu.org/licenses/> or
+# write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston,
+# MA 02110-1301, USA.
+#
+# You should have received a copy of the CeCILL-C license with this program.
+# If not see <http://www.cecill.info/licences/Licence_CeCILL-C_V1-en.txt>
+#
+# Intellectual property belongs to IRD
+#
+# Written by Philippe Cubry, Charlotte Tollenaere
+#
+###################################################################################################################################
+
+title: "Riz_Burkina_and_refs"
+author: "Philippe Cubry"
+date: "15/12/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(123456789)
+```
+
+We import the data within R.
+## Importing datasets
+
+```{r library and data import}
+library(LEA)
+library(data.table)
+library(adegenet)
+library(hierfstat)
+library(pegas)
+library(ape)
+library(ggimage)
+library(ggtree)
+library(tidyverse)
+library(scales)
+library(dplyr)
+library(ggrepel)
+library(cowplot)
+library(ggnewscale)
+
+data <- read.lfmm("burkina_ref_snpseek.lfmm")
+inds <- fread("burkina_ref_snpseek.ind",header = FALSE)
+snps <- fread("burkina_refsnpseek.snp",header=FALSE)
+data[data==9] <- NA
+row.names(data) <- snps$V1
+colnames(data) <- inds$V1
+bk_inds <- read.table("bk_inds.csv")
+```
+
+# Data filtering
+## Missingness
+As we have a very large dataset for the 3k genomes, we chose to first compute missingness only on the Burkinabese dataset.
+```{r missingnes computation}
+snp_missingness <- apply(data[,1:nrow(bk_inds)],1,FUN = function(x){length(which(is.na(x)))/length(x)*100}) # Compute proportion of missing data per SNP
+hist(snp_missingness,breaks = 20) # Draw histogram of missingness
+```
+We chose a cutoff of 15% for keeping SNPs.
+```{r missingness filtering}
+data <- data[snp_missingness<=15,]
+```
+This resulted in keeping `r nrow(data)` SNPs from the 6417 initial dataset.
+
+We computed again the missingness on the whole dataset to validate the quality of retained SNPs.
+```{r missingness computation 2}
+snp_missingness_all <- apply(data[,],1,FUN = function(x){length(which(is.na(x)))/length(x)*100}) # Compute proportion of missing data per SNP
+hist(snp_missingness_all,breaks = 20) # Draw histogram of missingness
+```
+As we still have some SNPs with large portion of missing data, we apply a new filter on the whole dataset.
+We chose a more stringent cutoff of 10% for keeping SNPs.
+```{r missingnes filtering 2}
+data <- data[snp_missingness_all<=10,]
+```
+This resulted in finally keeping `r nrow(data)` SNPs from the 6417 initial dataset.
+
+## Heterozygosity
+```{r heterozygosity computation}
+het <- apply(data,1,function(x){x=na.omit(x);sum(x==1)/length(x)*100})
+hist(het[het>5],breaks = 20)
+```
+As high heterozygosity might be due to genotyping bias or duplicated locus, we filtered out SNPs with more than 45% of heterozygosity.
+```{r heterozygosity filtering}
+data <- data[het <= 45,]
+```
+This resulted in a dataset with `r nrow(data)` SNPs.
+
+## Minimum Allele Frequency
+```{r maf computation and visualisation}
+maf_diplo <- function(x){ x <- as.numeric(na.omit(x));(min(sum(x),2*length(x)-sum(x)))/(2*length(x))}
+maf_data <- apply(data,1,maf_diplo)
+hist(maf_data,breaks = 25)
+```
+
+This distribution of allele frequencies appears to be unusual but it might be related to the choice of SNPs for the chip. Therefore for a first analysis we did not apply any filter on this statistic.
+
+We thus obtained a dataset with `r nrow(data)` SNPs after filtering.
+
+## Exporting data
+We can now export the resulting filtered file in a .geno one for subsequent analysis.
+```{r convert to lfmm}
+tmp <- t(apply(data,2,as.numeric))
+write.lfmm(tmp,"burkina_ref_filtered_publi.lfmm")
+inds <- colnames(data) ; write.table(inds,"burkina_ref_filtered_publi.ind",row.names = F,col.names = F,quote = F)
+snps <- row.names(data) ; write.table(snps,"burkina_ref_filtered_publi.snp",row.names = F,col.names = F,quote = F)
+rm(tmp,maf_data,snp_missingness,snp_missingness_all,het)
+```
+
+# Analysis
+## PCA
+We can first easily make a Principal Component Analysis based on the filtered dataset.
+
+```{r pca}
+pca_both <- pca("burkina_ref_filtered_publi.lfmm")
+```
+```{r plot eigenvalues}
+plot(pca_both)
+```
+
+We see here that the three first components explain a large portion of the variation, contributing respectively `r summary(pca_both)[2,1]`, `r summary(pca_both)[2,2]` and `r summary(pca_both)[2,3]` to the explanation of variance.
+We can now plot the resulting PCA, on axes 1-2 and 2-3.
+```{r}
+burk_passport_tmp <- fread("Sample_List_12072021.csv")
+burk_passport <- merge(inds[1:nrow(bk_inds)],burk_passport_tmp,by.x=1,by.y="Name",sort = F)
+
+ref_passport_tmp <- fread("varieties-3442742964161006397.csv")
+ref_passport <- merge(inds[(nrow(bk_inds)+1):ncol(data)],ref_passport_tmp,by.x=1,by.y="ID",sort = F,all.x=TRUE)
+
+pca_passport <- rbind(burk_passport[,c("x","Type1")],cbind("x"=ref_passport[,1],"Type1"=ref_passport[,6]))
+pca_passport_2 <- rbind(burk_passport[,c("x","Type1")],cbind("x"=ref_passport[,1],"Type1"=ref_passport[,5]))
+
+library(ggplot2)
+```
+We can superimpose the Burkinabese samples over the whole PCA.
+```{r}
+myCol <- c("grey60","green1","magenta","magenta4","deepskyblue","royalblue1","cyan3","blue1")
+ggplot(data=as.data.frame(pca_both$projections[(nrow(bk_inds)+1):nrow(pca_both$projections),]))+
+  geom_point(aes(V1,V2,col=as.factor(pca_passport$Type1[(nrow(bk_inds)+1):nrow(pca_both$projections)])))+
+  scale_color_manual(values=myCol) +
+  geom_point(data=as.data.frame(pca_both$projections[1:nrow(bk_inds),]),aes(V1,V2,shape= burk_passport$Type1),col="black")+
+  scale_shape_manual(values=c(3,0))+
+  theme_classic()+
+  guides(
+    colour = guide_legend("Diversity group (3K data)"),
+    shape = guide_legend("Burkinabese samples")
+ )
+
+ggplot(data=as.data.frame(pca_both$projections[(nrow(bk_inds)+1):nrow(pca_both$projections),]))+
+  geom_point(aes(V1,V3,col=as.factor(pca_passport$Type1[(nrow(bk_inds)+1):nrow(pca_both$projections)])))+
+  scale_color_manual(values=myCol) +
+  geom_point(data=as.data.frame(pca_both$projections[1:nrow(bk_inds),]),aes(V1,V3,shape= burk_passport$Type1),col="black")+
+  scale_shape_manual(values=c(3,0))+
+  theme_classic()+
+  guides(
+    colour = guide_legend("Diversity group (3K data)"),
+    shape = guide_legend("Burkinabese samples")
+ )
+```
+Based on this PCA, we can observe that the references genotypes seems to correspond to the genetic groups from the 3k genomes, mainly from the indica and tropical japonica, with one (FKR04) being classified with the admixed. All field genotypes but one fall well within the indica diversity group. One field genotype (TG02) appears to be related to the aus genetic group.
+```{r cleaning}
+rm(pca_both)
+```
+
+## Conversion to genind (adegenet)
+```{r}
+data[data==0] <- "0/0"
+data[data==1] <- "0/1"
+data[data==2] <- "1/1"
+ade <- df2genind(X=t(data),sep="/",ncode=1,ind.names=inds,loc.names=snps,NA.char=NA,ploidy=2,type="c",pop=pca_passport$Type1)
+```
+
+As the grouping appears pretty good regarding the previously made PCA, we can use the DAPC functionnality of adegenet based on defined groups to identify discriminant functions and then apply them to the Field and MP groups to assign individuals to representative diversity clusters.
+We first run the DAPC on the identified diversity groups and assess the performance of the clustering.
+```{r}
+dapc_rice <- dapc(ade[pop(ade)!="Field"&pop(ade)!="admix"&pop(ade)!="Certified"],
+                 pop(ade[pop(ade)!="Field"&pop(ade)!="admix"&pop(ade)!="Certified"]),
+                 n.pca=250,
+                 n.da=6)
+
+myCol <- c("darkblue","purple","green","orange","red","blue","gray15")
+
+scatter(dapc_rice,1,2, bg="white", pch=20, cell=0,
+cstar=0, col=myCol,  cex=3, clab=0,solid=.4,
+scree.da=FALSE,
+scree.pca=TRUE, posi.pca="topleft",
+leg=TRUE,
+txt.leg=levels(pop(ade[pop(ade)!="Field"&pop(ade)!="admix"&pop(ade)!="Certified"])))
+
+scatter(dapc_rice,1,3, bg="white", pch=20, cell=0,
+cstar=0, col=myCol,  cex=3, clab=0,solid=.4,
+scree.da=FALSE,
+scree.pca=TRUE, posi.pca="bottomright",
+leg=TRUE,
+txt.leg=levels(pop(ade[pop(ade)!="Field"&pop(ade)!="admix"&pop(ade)!="Certified"])))
+
+summary(dapc_rice)
+```
+We obtain a pretty good predictor for group membership (above 90% of correct posterior assignation compared to prior information), especially for indica, aus and aromatic groups. We can thus use this trained discriminant analysis to attribute Burkinabese genotypes to genetic clusters with correct accuracy.
+
+```{r}
+pred_admix <- predict.dapc(dapc_rice,ade[pop(ade)=="admix"])
+pred_admix$assign
+compoplot(pred_admix$posterior)
+
+pred_Ref <- predict.dapc(dapc_rice,ade[pop(ade)=="Certified"])
+pred_Ref$assign
+compoplot(pred_Ref$posterior)
+
+pred_Field <- predict.dapc(dapc_rice,ade[pop(ade)=="Field"])
+pred_Field$assign
+rownames(pred_Field$posterior)[pred_Field$assign=="aus"]
+```
+
+Reference genotypes are either assigned to indica or japonica tropical clusters.
+All but one field genotypes was assigned to the indica group. Only Field_2018_TG02 is assigned to the aus genetic cluster.
+
+We can go a little further by investigating more in details the indica group. The 3k genomes consider sub-groups within the indica that we can use.
+
+```{r}
+ade_b <- df2genind(X=t(data),sep="/",ncode=1,ind.names=inds,loc.names=snps,NA.char=NA,ploidy=2,type="c",pop=pca_passport_2$Type1)
+
+dapc_ind <- dapc(ade_b[pop(ade_b)=="indx"|pop(ade_b)=="ind1A"|pop(ade_b)=="ind1B"|pop(ade_b)=="ind2"|pop(ade_b)=="ind3"],
+                 pop(ade_b[pop(ade_b)=="indx"|pop(ade_b)=="ind1A"|pop(ade_b)=="ind1B"|pop(ade_b)=="ind2"|pop(ade_b)=="ind3"]),
+                 n.pca=250,
+                 n.da=4)
+
+
+scatter(dapc_ind,1,2, bg="white", pch=20, cell=0,
+cstar=0, col=myCol,  cex=3, clab=0,solid=.6,
+scree.da=FALSE,
+scree.pca=TRUE, posi.pca="topleft",
+leg=TRUE,
+txt.leg=levels(pop(ade_b[pop(ade_b)=="indx"|pop(ade_b)=="ind1A"|pop(ade_b)=="ind1B"|pop(ade_b)=="ind2"|pop(ade_b)=="ind3"])))
+
+scatter(dapc_ind,1,3, bg="white", pch=20, cell=0,
+cstar=0, col=myCol,  cex=3, clab=0,solid=.4,
+scree.da=FALSE,
+scree.pca=TRUE, posi.pca="bottomright",
+leg=TRUE,
+txt.leg=levels(pop(ade_b[pop(ade_b)=="indx"|pop(ade_b)=="ind1A"|pop(ade_b)=="ind1B"|pop(ade_b)=="ind2"|pop(ade_b)=="ind3"])))
+
+summary(dapc_ind)
+```
+As the groups are more genetically close than previously, the accuracy of the clustering appears weaker, still we can assign the Field individuals to the ind clusters after removing the TG02 which was classified with the aus group.
+```{r}
+pred_Field <- predict.dapc(dapc_ind,ade_b[pop(ade_b)=="Field"&indNames(ade_b)!="Field_2018_TG02"])
+pred_Field$assign
+```
+The Field genotypes belong either to clusters indxn ind1B or ind3. All in all it indicates that some of the indica diversity is present in Burkina but that there is still some untaped genetic diversity in this diversity group, not to mention the other ones.
+We will now do a little cleaning of the environment before going more in depth with the intra-Burkina analysis.
+
+```{r}
+rm(ade_b,treeFst,pred_admix,pred_Field,pred_Ref)
+```
+We can now focus on the cultivated Burkinabese samples. First we extract those genotypes from the dataset, then we import the passport data in the strata slot of the field genind object.
+```{r}
+field <- seppop(ade)$Field
+burk_all <- repool(seppop(ade)$Certified,seppop(ade)$Field)
+strata(field) <- merge(x = indNames(field),y = burk_passport_tmp,by.x=1,by.y="Name",sort=FALSE)
+colnames(strata(field))[1] <- "id"
+strata(burk_all) <- merge(x = indNames(burk_all),y = burk_passport_tmp,by.x=1,by.y="Name",sort=FALSE)
+colnames(strata(burk_all))[1] <- "id"
+```
+We can now use the passport data to set populations for the diversity/Fst analysis.
+First we calculate genetic distances btwn Burkinabese accessions (including Ref and Field collected samples) and draw a NJ tree.
+```{r}
+library(ape)
+setPop(burk_all) <- ~Rice_system
+burkina_dist <- dist.gene(burk_all@tab,pairwise.deletion = F)
+burkina_tree <- njs(burkina_dist,fs = 10)
+burkina_tree$tip.label <- merge(burkina_tree$tip.label,burk_passport_tmp,by.x=1,by.y="Name",sort=FALSE)$Final_Name
+burk_color <- c(rep("gray50",length(which(strata(burk_all)$Type1=="Certified"))),c("cyan2","coral2")[pop(burk_all)][length(which(strata(burk_all)$Type1=="Certified"))+1:length(which(strata(burk_all)$Type1!="Certified"))])
+pdf(file = "Burk_tree_phylogram.pdf")
+plot(burkina_tree,type = "p",cex=0.6,tip.color=burk_color,lab4ut="axial")
+dev.off()
+pdf(file = "Burk_tree_unrooted.pdf")
+plot(burkina_tree,type = "u",cex=0.6,tip.color=burk_color,lab4ut="axial")
+dev.off()
+write.tree("Burk_tree.newick",phy = burkina_tree)
+fwrite(as.matrix(burkina_dist),"Burk_dist.csv")
+```
+```{r}
+p<-ggtree(burkina_tree, layout="fan")
+p
+
+# rotation de l'ensemble de l'arbre
+p_rot<-rotate_tree(p, 210)
+p_rot
+
+metadata<-(strata(burk_all)[,-c(1:3)])
+
+# dessiner l'arbre AVEC metadonnées   #circular
+p <- ggtree(burkina_tree, layout="circular", size=1, linetype=1) %<+% metadata
+p1<-rotate_tree(p, 210)+  geom_tiplab(aes(color = Type2), size=3)+
+    scale_color_manual(values=c( "grey", "coral2", "cyan2"))
+p1
+
+# colorer les clades. alpha règle le niveau de transparence.
+p_col<-p1 +   
+  geom_hilight(node=147, fill="#0000CC", alpha=0.2, extend=10)+
+  geom_hilight(node=74, fill="#FF00FF", alpha=0.2)+
+  geom_hilight(node=8, fill="#999999", alpha=0.2)
+p_col
+
+ggsave("tree_test_v.pdf", width = 50, height = 50, units = "cm", limitsize = FALSE)
+```
+
+
+```{r}
+setPop(field) <- ~Site2
+hier(field) <- ~Zone/Site2
+```
+
+```{r}
+field_data <- tab(field,freqq=TRUE,NA.method="mean")
+field_pca <- dudi.pca(field_data,nf=4,scannf = FALSE)
+
+p1 <- ggplot(data=field_pca$li)+
+  geom_point(aes(Axis1,Axis2,col=as.factor(strata(field)$Rice_system),shape=strata(field)$Zone),size=3,alpha=0.6)+
+  scale_color_manual(name = "Rice system", breaks=c("IR","RL"), values = c("cyan2", "coral2")) +
+  scale_shape_manual(name = "Zone", breaks=c("Bama","Banzon","Karfiguela"), values = c(19,17,15)) +
+  theme_classic()
+
+p2 <- ggplot(data=field_pca$li,aes(Axis1,Axis2,col=as.factor(strata(field)$Variete_cultivee_cat)))+
+  geom_point(size=2)+
+  scale_color_manual(name = "Cultivated variety", breaks=c("FKR64","FKR62N","Hom_aut","Pay"), values = c("#CC33CC", "#9933FF","#4A1486","#00CC66"))+
+geom_text_repel(aes(Axis1,Axis2,label=strata(field)$Final_Name),max.overlaps = 100,
+    segment.linetype = 2,size=3) + guides(color = guide_legend(override.aes = aes(label = "")))+
+
+  theme_classic()
+pdf(file = "Burk_field_test1.pdf",width = 15,height = 6)
+plot_grid(p1, p2, labels = c('a', 'b'), label_size = 12)
+dev.off()
+
+pdf(file = "Burk_field_test2.pdf",width = 16,height = 12)
+ggplot(data=field_pca$li,aes(Axis1,Axis2,col=as.factor(strata(field)$Rice_system),shape=strata(field)$Zone))+
+  geom_point(size=2.5)+
+  scale_color_manual(name = "Rice system", breaks=c("IR","RL"), values = c("cyan2", "coral2")) +
+  scale_shape_manual(name = "Zone", breaks=c("Bama","Banzon","Karfiguela"), values = c(19,17,15))+
+  new_scale_color()+scale_color_manual(name = "Named variety", breaks=c("FKR64","FKR62N","Hom_aut","Pay"), values = c("#CC33CC", "#9933FF","#4A1486","#00CC66"))+
+  geom_text_repel(aes(Axis1,Axis2,label=strata(field)$Final_Name,col=as.factor(strata(field)$Variete_cultivee_cat)),box.padding = .5,size=4,max.overlaps = 30,
+    segment.linetype = 2,segment.size=0.5) +
+  theme_classic()
+dev.off()
+
+pdf(file = "Burk_field_test3.pdf",width = 12,height = 8)
+ggplot(data=field_pca$li[-which(strata(field)$Final_Name=="TG02"),],aes(Axis1,Axis2,col=strata(field)$Rice_system[-which(strata(field)$Final_Name=="TG02")],shape=strata(field)$Zone[-which(strata(field)$Final_Name=="TG02")]))+
+  geom_point(size=2.5,alpha=0.5)+
+  scale_color_manual(name = "Rice system", breaks=c("IR","RL"), values = c("cyan2", "coral2")) +
+  scale_shape_manual(name = "Zone", breaks=c("Bama","Banzon","Karfiguela"), values = c(19,17,15))+
+  new_scale_color()+scale_color_manual(name = "Named variety", breaks=c("FKR64","FKR62N","Hom_aut","Pay"), values = c("#CC33CC", "#9933FF","#4A1486","#00CC66"))+
+  geom_text_repel(aes(Axis1,Axis2,label=strata(field)$Final_Name[-which(strata(field)$Final_Name=="TG02")],col=strata(field)$Variete_cultivee_cat[-which(strata(field)$Final_Name=="TG02")]),box.padding = .3,size=4,max.overlaps = 50,
+    segment.linetype = 2,segment.size=0.5,point.padding=0.5) +
+  theme_classic()
+dev.off()
+```
+
+We can also compute some summary statistics at different hierarchy levels as well as estimate the pairwise Fst between populations defined with regard to the hierarchic level considered.
+
+```{r}
+setPop(field) <- ~Type1
+field_Stats <- basic.stats(field)
+apply(field_Stats$Hs,2,mean)
+field_fst <- pairwise.WCfst(dat=genind2hierfstat(field))
+field_fstBootstp <- boot.ppfst(field)
+
+setPop(field) <- ~Zone
+zone_Stats <- basic.stats(field)
+apply(zone_Stats$Hs,2,mean)
+zone_fst <- pairwise.WCfst(dat=genind2hierfstat(field))
+zone_fstBootstp <- boot.ppfst(field)
+
+setPop(field) <- ~Rice_system
+riceSyst_Stats <- basic.stats(field)
+apply(riceSyst_Stats$Hs,2,mean)
+riceSyst_fst <- pairwise.WCfst(dat=genind2hierfstat(field))
+riceSyst_fstBootstp <- boot.ppfst(field)
+
+setPop(field) <- ~Site2
+site2_Stats <- basic.stats(field)
+apply(site2_Stats$Hs,2,mean)
+site2_fst <- pairwise.WCfst(dat=genind2hierfstat(field))
+site2_fstBootstp <- boot.ppfst(field)
+```
+For comparison purpose, we can calculate the summary statistics on the whole 3K set.
+
+```{r}
+rice3k_Stats <- basic.stats(ade)
+apply(rice3k_Stats$Hs,2,mean)
+```
+
